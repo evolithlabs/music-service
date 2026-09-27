@@ -1,3 +1,4 @@
 /downloads
 /tmp
 /pb_data
+.env.local
