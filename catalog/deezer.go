@@ -31,9 +31,11 @@ type deezerTrack struct {
 	Preview  string `json:"preview"`
 	Link     string `json:"link"`
 	Artist   struct {
+		ID   int64  `json:"id"`
 		Name string `json:"name"`
 	} `json:"artist"`
 	Album struct {
+		ID          int64  `json:"id"`
 		Title       string `json:"title"`
 		CoverBig    string `json:"cover_big"`
 		CoverMedium string `json:"cover_medium"`
@@ -92,7 +94,7 @@ func normalizeDeezer(item deezerTrack) Track {
 	if cover == "" {
 		cover = item.Album.CoverMedium
 	}
-	return Track{DeezerID: item.ID, Title: item.Title, Artist: item.Artist.Name, Album: item.Album.Title, DurationMs: item.Duration * 1000, CoverURL: cover, ISRC: item.ISRC, PreviewURL: item.Preview, CatalogURL: item.Link, Source: "deezer"}
+	return Track{DeezerID: item.ID, DeezerArtistID: item.Artist.ID, DeezerAlbumID: item.Album.ID, Title: item.Title, Artist: item.Artist.Name, Album: item.Album.Title, DurationMs: item.Duration * 1000, CoverURL: cover, ISRC: item.ISRC, PreviewURL: item.Preview, CatalogURL: item.Link, Source: "deezer"}
 }
 func (c *DeezerClient) Search(ctx context.Context, query string, offset int) (*SearchResult, error) {
 	params := url.Values{"q": {strings.TrimSpace(query)}, "index": {strconv.Itoa(offset)}, "limit": {"20"}, "order": {"RANKING"}}

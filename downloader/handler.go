@@ -21,6 +21,8 @@ import (
 // MAIN HANDLER ENTRY
 // ======================================================================
 func DownloadTrack(ctx context.Context, app core.App, track *core.Record) (*core.Record, error) {
+	activeProgress.Store(track.Id, downloadProgress{Stage: "starting"})
+	defer activeProgress.Delete(track.Id)
 	// Download from youtube
 	downloadDir := "./downloads"
 	if err := os.MkdirAll(downloadDir, 0700); err != nil {
@@ -31,25 +33,12 @@ func DownloadTrack(ctx context.Context, app core.App, track *core.Record) (*core
 	tmpFile := filepath.Join(downloadDir, fmt.Sprintf("%s.mp3", fileID))
 
 	defer os.Remove(tmpFile)
-	cmd := createYTDLPCommand(ctx, track, tmpFile)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Exit code 101 means "Max downloads reached", which is a SUCCESS for us
-			if exitErr.ExitCode() == 101 {
-				err = nil
-			}
-		}
-
-		// If err is still not nil (meaning it's a real error, like 1 or 255), handle it
-		if err != nil {
-			return nil, fmt.Errorf("yt-dlp failed: %w", err)
-		}
+	if err := downloadAudio(ctx, track, tmpFile, func(cmd *exec.Cmd) error { return cmd.Run() }); err != nil {
+		return nil, err
 	}
 
 	// Apply ID3 tags
+	updateProgress(track.Id, "GROOVIO_PROCESSING")
 	if err := writeID3Tags(track, tmpFile, fileID, downloadDir); err != nil {
 		return nil, err
 	}
@@ -71,15 +60,57 @@ func DownloadTrack(ctx context.Context, app core.App, track *core.Record) (*core
 // ======================================================================
 
 func createYTDLPCommand(ctx context.Context, track *core.Record, tmpFile string) *exec.Cmd {
+	return audioSearchCommand(ctx, track, tmpFile, true)
+}
+
+func downloadAudio(ctx context.Context, track *core.Record, tmpFile string, run func(*exec.Cmd) error) error {
+	var lastErr error
+	// The official-audio query can hide a matching upload. Try the exact recording
+	// without that suffix before reporting it unavailable; keep its version intact.
+	for _, official := range []bool{true, false} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cmd := audioSearchCommand(ctx, track, tmpFile, official)
+		cmd.Stdout = &progressOutput{jobID: track.Id, output: os.Stdout}
+		cmd.Stderr = &progressOutput{jobID: track.Id, output: os.Stderr}
+		err := run(cmd)
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 101 {
+			err = nil
+		}
+		if err == nil {
+			if info, statErr := os.Stat(tmpFile); statErr == nil && info.Size() > 0 {
+				return nil
+			}
+		}
+		lastErr = err
+		os.Remove(tmpFile)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if lastErr != nil {
+		return fmt.Errorf("YouTube could not provide audio for this recording. Try again or choose another version of the song.")
+	}
+	return fmt.Errorf("No matching YouTube audio was found for this recording. Try another version of the song.")
+}
+
+func audioSearchCommand(ctx context.Context, track *core.Record, tmpFile string, official bool) *exec.Cmd {
 	title := track.GetString("name")
-	if track.GetString("musicbrainz_recording_id") == "" {
+	if track.GetString("musicbrainz_recording_id") == "" && track.GetString("metadata_source") != "deezer" {
 		title = cleanTrackName(title)
 	}
-	search := fmt.Sprintf("%s %s official audio", track.GetString("artist"), title)
+	search := fmt.Sprintf("%s %s", track.GetString("artist"), title)
+	if official {
+		search += " official audio"
+	}
 
 	desired := track.GetInt("duration") / 1000
-	min := max(0, desired-60)
-	max := desired + 5
+	// Music videos may have a short intro or outro. A balanced tolerance avoids
+	// rejecting them while excluding full recordings for a short TV edit.
+	tolerance := min(30, max(10, desired/10))
+	minimum := max(0, desired-tolerance)
+	maximum := desired + tolerance
 
 	args := []string{
 		"--extract-audio",
@@ -89,9 +120,13 @@ func createYTDLPCommand(ctx context.Context, track *core.Record, tmpFile string)
 		"--format", "bestaudio/best",
 		"--no-playlist",
 		"--max-downloads", "1",
+		"--newline", "--no-color", "--progress",
+		"--progress-delta", "0.25",
+		"--progress-template", "download:GROOVIO_PROGRESS:%(progress._percent_str)s",
+		"--progress-template", "postprocess:GROOVIO_PROCESSING",
 	}
 	if desired > 0 {
-		args = append(args, "--match-filter", fmt.Sprintf("duration>%d & duration<%d", min, max))
+		args = append(args, "--match-filter", fmt.Sprintf("duration>=%d & duration<=%d", minimum, maximum))
 	}
 	args = append(args, "--", fmt.Sprintf("ytsearch10:%s", search))
 	return exec.CommandContext(ctx, "yt-dlp", args...)
@@ -119,6 +154,8 @@ func writeID3Tags(track *core.Record, tmpFile, fileID, dir string) error {
 	defer tag.Close()
 
 	tag.SetVersion(3)
+	// ID3v2.3 defaults to Latin-1; catalog metadata requires Unicode.
+	tag.SetDefaultEncoding(id3v2.EncodingUTF16)
 	tag.SetTitle(track.GetString("name"))
 
 	tag.SetArtist(track.GetString("artist"))
@@ -139,7 +176,7 @@ func writeID3Tags(track *core.Record, tmpFile, fileID, dir string) error {
 		if err := downloadFile(coverURL, coverPath); err == nil {
 			imgBytes, _ := os.ReadFile(coverPath)
 			tag.AddAttachedPicture(id3v2.PictureFrame{
-				Encoding:    id3v2.EncodingUTF8,
+				Encoding:    tag.DefaultEncoding(),
 				MimeType:    http.DetectContentType(imgBytes),
 				PictureType: id3v2.PTFrontCover,
 				Picture:     imgBytes,

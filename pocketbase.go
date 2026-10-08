@@ -8,8 +8,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"api.groovio/catalog"
+	"api.groovio/downloader"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/apis"
@@ -54,6 +56,13 @@ func main() {
 			}
 		}
 		app.Cron().MustAdd("queue_worker", "*/1 * * * *", worker.process)
+		cleanup := func() {
+			if _, err := downloader.CleanupAudio(app, time.Now(), 24*time.Hour, 1<<30); err != nil {
+				log.Printf("Cleaning audio cache: %v", err)
+			}
+		}
+		app.Cron().MustAdd("audio_cache", "*/15 * * * *", cleanup)
+		go cleanup()
 		go worker.process()
 
 		// 3. Expose endpoint for playing/download tracks
@@ -67,6 +76,11 @@ func main() {
 			if err != nil {
 				return e.JSON(http.StatusNotFound, "Track not found")
 			}
+			record, release, err := downloader.AcquireAudio(app, record.Id, time.Now())
+			if err != nil {
+				return e.JSON(http.StatusNotFound, "Track file not available")
+			}
+			defer release()
 
 			fileName := record.GetString("file")
 			if fileName == "" {

@@ -55,6 +55,14 @@ Migrations add MusicBrainz recording/release IDs, ISRC, Deezer track IDs, metada
 
 MP3 tags include title, artist, album, album artist, year, available cover art, Deezer track ID, available MusicBrainz recording/release/artist IDs, ISRC, `GROOVIO_METADATA_SOURCE`, and `GROOVIO_ORIGIN=service`. ISRC is also retained when MusicBrainz enrichment finds no match. Search qualifiers such as remix/live versions are retained in audio queries. Missing catalog durations do not exclude every audio candidate. Audio matching still depends on yt-dlp's search results.
 
+## Temporary playback and audio retention
+
+Play prepares audio on the server and uses the ranged file endpoint directly. It does not add a song or audio bytes to the app's offline library; Download remains the explicit offline-save action.
+
+Completed server audio expires after 24 hours without a prepare/file request. Cleanup runs at startup and every 15 minutes, preserving catalog metadata and marking the job expired. A later request requeues the same job and regenerates its audio. Local offline copies are unaffected.
+
+The server also targets a 1 GiB audio cache, evicting the least recently used files under storage pressure. Active file responses and files accessed within the last hour are protected, so this target can temporarily be exceeded. File access refreshes retention at both the beginning and end of the response. Legacy playback uses the same access protection.
+
 ## Verification
 
 ```sh

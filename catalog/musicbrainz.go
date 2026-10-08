@@ -15,6 +15,8 @@ import (
 
 type Track struct {
 	DeezerID       int64  `json:"deezerId,omitempty"`
+	DeezerArtistID int64  `json:"deezerArtistId,omitempty"`
+	DeezerAlbumID  int64  `json:"deezerAlbumId,omitempty"`
 	PreviewURL     string `json:"previewUrl,omitempty"`
 	CatalogURL     string `json:"catalogUrl,omitempty"`
 	Source         string `json:"source,omitempty"`

@@ -219,3 +219,60 @@ func TestPreparedAudioSizeAndDurableUploadFailure(t *testing.T) {
 		t.Fatal("failure state not persisted:", err)
 	}
 }
+
+func TestID3UnicodeMetadata(t *testing.T) {
+	app := testApp(t)
+	track, err := QueueTrack(app, DownloadRequest{DeezerID: 2580253682})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cover := []byte{0xff, 0xd8, 0xff, 0xe0}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(cover)
+	}))
+	defer server.Close()
+	track.Set("cover_url", server.URL)
+	track.Set("metadata_source", "deezer")
+	for _, example := range []struct {
+		field string
+		frame string
+		value string
+	}{
+		{"name", "TIT2", "Bling‐Bang‐Bang‐Born"},
+		{"artist", "TPE1", "クリーピーナッツ"},
+		{"album", "TALB", "Ősz 🎵"},
+		{"album_artist", "TPE2", "宇多田ヒカル"},
+	} {
+		t.Run(example.field, func(t *testing.T) {
+			for _, field := range []string{"name", "artist", "album", "album_artist"} {
+				track.Set(field, "ASCII metadata")
+			}
+			track.Set(example.field, example.value)
+			path := filepath.Join(t.TempDir(), "unicode.mp3")
+			if err := os.WriteFile(path, []byte{'I', 'D', '3', 3, 0, 0, 0, 0, 0, 0, 0xff, 0xfb, 0x90, 0x64}, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeID3Tags(track, path, "unicode", filepath.Dir(path)); err != nil {
+				t.Fatal("Unicode metadata prevented saving audio:", err)
+			}
+			tag, err := id3v2.Open(path, id3v2.Options{Parse: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tag.Close()
+			frame := tag.GetTextFrame(example.frame)
+			if tag.Version() != 3 || frame.Text != example.value || !frame.Encoding.Equals(id3v2.EncodingUTF16) {
+				t.Fatalf("Unicode metadata did not round-trip: %+v", frame)
+			}
+			pictures := tag.GetFrames("APIC")
+			if len(pictures) != 1 {
+				t.Fatal("cover art was lost")
+			}
+			picture := pictures[0].(id3v2.PictureFrame)
+			if !picture.Encoding.Equals(id3v2.EncodingUTF16) || string(picture.Picture) != string(cover) {
+				t.Fatal("cover art does not use the Unicode-compatible tag encoding")
+			}
+		})
+	}
+}

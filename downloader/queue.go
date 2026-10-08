@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"api.groovio/catalog"
 	"github.com/google/uuid"
@@ -71,12 +72,28 @@ func QueueTrack(app core.App, request DownloadRequest) (*core.Record, error) {
 		}
 		track, err := tx.FindFirstRecordByFilter("tracks", filter, params)
 		if err == nil {
-			if track.GetString("download_status") == "failed" {
-				track.Set("download_status", "queued")
-				track.Set("download_error", "")
-				if err := tx.Save(track); err != nil {
+			if track.GetString("download_status") == "completed" && track.GetString("file") != "" {
+				fs, err := tx.NewFilesystem()
+				if err != nil {
 					return err
 				}
+				exists, err := fs.Exists(track.BaseFilesPath() + "/" + track.GetString("file"))
+				fs.Close()
+				if err != nil {
+					return err
+				}
+				if !exists {
+					track.Set("file", "")
+					track.Set("download_status", "expired")
+				}
+			}
+			if track.GetString("download_status") == "failed" || track.GetString("download_status") == "expired" || track.GetString("download_status") == "completed" && track.GetString("file") == "" {
+				track.Set("download_status", "queued")
+				track.Set("download_error", "")
+			}
+			track.Set("audio_last_used", time.Now().UnixMilli())
+			if err := tx.Save(track); err != nil {
+				return err
 			}
 			result = track
 			return nil
@@ -165,6 +182,8 @@ type Job struct {
 	ID                 string        `json:"id"`
 	Status             string        `json:"status"`
 	Error              string        `json:"error,omitempty"`
+	Progress           *float64      `json:"progress,omitempty"`
+	Stage              string        `json:"stage,omitempty"`
 	Metadata           catalog.Track `json:"metadata"`
 }
 
@@ -173,10 +192,17 @@ func Snapshot(track *core.Record) Job {
 	if releaseID == "" {
 		releaseID = track.GetString("musicbrainz_release_id")
 	}
-	return Job{ID: track.Id, RequestedReleaseID: track.GetString("musicbrainz_release_id"), Status: track.GetString("download_status"), Error: track.GetString("download_error"), Metadata: catalog.Track{
+	job := Job{ID: track.Id, RequestedReleaseID: track.GetString("musicbrainz_release_id"), Status: track.GetString("download_status"), Error: track.GetString("download_error"), Metadata: catalog.Track{
 		DeezerID: int64(track.GetInt("deezer_id")), Source: track.GetString("metadata_source"),
 		RecordingID: track.GetString("musicbrainz_recording_id"), ReleaseID: releaseID,
 		Title: track.GetString("name"), Artist: track.GetString("artist"), Album: track.GetString("album"),
 		DurationMs: track.GetInt("duration"), CoverURL: track.GetString("cover_url"), ISRC: track.GetString("isrc"),
 	}}
+	if job.Status == "downloading" {
+		if value, ok := activeProgress.Load(track.Id); ok {
+			progress := value.(downloadProgress)
+			job.Progress, job.Stage = progress.Percent, progress.Stage
+		}
+	}
+	return job
 }

@@ -67,6 +67,7 @@ func (w *downloadWorker) run(track *core.Record) {
 		log.Printf("Download job %s failed: %v", track.Id, err)
 	} else {
 		track.Set("download_status", "completed")
+		track.Set("audio_last_used", time.Now().UnixMilli())
 		track.Set("download_error", "")
 	}
 	if err := w.app.Save(track); err != nil {
@@ -78,6 +79,7 @@ func registerCatalogRoutes(app core.App, se *core.ServeEvent, client *catalog.Cl
 	if worker.deezer == nil {
 		worker.deezer = catalog.NewDeezerClient()
 	}
+	registerDiscographyRoutes(se, worker.deezer)
 	se.Router.GET("/api/search", func(e *core.RequestEvent) error {
 		query := strings.TrimSpace(e.Request.URL.Query().Get("q"))
 		if len(query) < 2 || len(query) > 200 {
@@ -124,10 +126,11 @@ func registerCatalogRoutes(app core.App, se *core.ServeEvent, client *catalog.Cl
 		return e.JSON(200, downloader.Snapshot(track))
 	})
 	se.Router.GET("/api/downloads/{id}/file", func(e *core.RequestEvent) error {
-		track, err := app.FindRecordById("tracks", e.Request.PathValue("id"))
-		if err != nil || track.GetString("download_status") != "completed" || track.GetString("file") == "" {
+		track, release, err := downloader.AcquireAudio(app, e.Request.PathValue("id"), time.Now())
+		if err != nil {
 			return e.JSON(404, map[string]string{"error": "Completed audio file not found"})
 		}
+		defer release()
 		fs, err := app.NewFilesystem()
 		if err != nil {
 			return e.JSON(500, map[string]string{"error": "File storage unavailable"})
